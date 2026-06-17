@@ -1,14 +1,15 @@
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import yt_dlp
 import re
+import aiohttp
 
 app = FastAPI(title="FB Downloader API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ضع دومينك هنا بعد الإطلاق
+    allow_origins=["*"],
     allow_methods=["GET"],
     allow_headers=["*"],
 )
@@ -36,8 +37,25 @@ def format_size(bytes_val):
 async def health():
     return {"status": "ok"}
 
+@app.get("/api/proxy")
+async def proxy_download(url: str = Query(...), filename: str = Query(default="video.mp4")):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.facebook.com/",
+    }
+    async def stream():
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                async for chunk in resp.content.iter_chunked(8192):
+                    yield chunk
+    return StreamingResponse(
+        stream(),
+        media_type="video/mp4",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
 @app.get("/api/download")
-async def download(url: str = Query(..., description="Facebook video URL")):
+async def download(url: str = Query(...)):
     if not url:
         return JSONResponse(status_code=422, content={"success": False, "error": "الرجاء إدخال رابط الفيديو"})
 
@@ -63,38 +81,42 @@ async def download(url: str = Query(..., description="Facebook video URL")):
         qualities = []
         added = set()
 
-        # HD qualities
         for f in formats:
             h = f.get("height") or 0
             ext = f.get("ext", "mp4")
             furl = f.get("url", "")
             size = format_size(f.get("filesize") or f.get("filesize_approx"))
             vcodec = f.get("vcodec", "none")
-            acodec = f.get("acodec", "none")
 
             if vcodec == "none":
                 continue
 
+            # بناء رابط البروكسي
+            import urllib.parse
+            proxy_url = f"/api/proxy?url={urllib.parse.quote(furl)}&filename=video_{h}p.mp4"
+
             if h >= 1080 and "1080p" not in added:
-                qualities.append({"quality": "1080p", "label": "عالي الدقة جداً", "url": furl, "size": size, "type": "HD", "ext": ext})
+                qualities.append({"quality": "1080p", "label": "عالي الدقة جداً", "url": proxy_url, "size": size, "type": "HD", "ext": ext})
                 added.add("1080p")
             elif h >= 720 and "720p" not in added:
-                qualities.append({"quality": "720p", "label": "عالي الدقة", "url": furl, "size": size, "type": "HD", "ext": ext})
+                qualities.append({"quality": "720p", "label": "عالي الدقة", "url": proxy_url, "size": size, "type": "HD", "ext": ext})
                 added.add("720p")
             elif h >= 480 and "480p" not in added:
-                qualities.append({"quality": "480p", "label": "جودة متوسطة", "url": furl, "size": size, "type": "SD", "ext": ext})
+                qualities.append({"quality": "480p", "label": "جودة متوسطة", "url": proxy_url, "size": size, "type": "SD", "ext": ext})
                 added.add("480p")
             elif h >= 360 and "360p" not in added:
-                qualities.append({"quality": "360p", "label": "جودة عادية", "url": furl, "size": size, "type": "SD", "ext": ext})
+                qualities.append({"quality": "360p", "label": "جودة عادية", "url": proxy_url, "size": size, "type": "SD", "ext": ext})
                 added.add("360p")
 
         # Audio only
         for f in formats:
             if f.get("vcodec") == "none" and f.get("acodec") != "none" and "audio" not in added:
+                import urllib.parse
+                proxy_url = f"/api/proxy?url={urllib.parse.quote(f.get('url',''))}&filename=audio.mp3"
                 qualities.append({
                     "quality": "MP3",
                     "label": "صوت فقط",
-                    "url": f.get("url", ""),
+                    "url": proxy_url,
                     "size": format_size(f.get("filesize") or f.get("filesize_approx")),
                     "type": "audio",
                     "ext": "mp3"
@@ -103,7 +125,7 @@ async def download(url: str = Query(..., description="Facebook video URL")):
                 break
 
         if not qualities:
-            return JSONResponse(status_code=422, content={"success": False, "error": "لم نتمكن من استخراج روابط التحميل من هذا الفيديو"})
+            return JSONResponse(status_code=422, content={"success": False, "error": "لم نتمكن من استخراج روابط التحميل"})
 
         return {
             "success": True,
@@ -126,4 +148,4 @@ async def download(url: str = Query(..., description="Facebook video URL")):
         return JSONResponse(status_code=422, content={"success": False, "error": error})
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "error": "حدث خطأ في السيرفر — حاول لاحقاً"})
+        return JSONResponse(status_code=500, content={"success": False, "error": "حدث خطأ في السيرفر"})
